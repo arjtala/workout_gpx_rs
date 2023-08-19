@@ -6,6 +6,9 @@ crates/*/target
 .idea/*
 *.log
 *.iml
+*.sqlite
+*.lock
+*.*~
 .vscode/settings.json
 generated_assists.adoc
 generated_features.adoc
