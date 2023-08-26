@@ -2,13 +2,14 @@
 /dist/
 crates/*/target
 **/*.rs.bk
-**/*.rs.pending-snap
+**/*.rs.pending-snapq
 .idea/*
 *.log
 *.iml
 *.sqlite
 *.lock
 *.*~
+#*.*#
 .vscode/settings.json
 generated_assists.adoc
 generated_features.adoc
