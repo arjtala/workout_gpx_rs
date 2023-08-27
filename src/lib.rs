@@ -15,6 +15,7 @@ use xml::reader::{EventReader, XmlEvent};
 
 static EPSILON: f64 = 0.0000001;
 const DATETIME_FMT: &str = "%Y-%m-%d-%H%M%S";
+const RECORD_TIMESTAMP: &str = "%Y-%m-%dT%H:%M:%S.000Z";
 const REGEX_CHARS: &str = "[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}";
 
 #[derive(Clone, EnumString, EnumVariantNames, Debug, Serialize, Deserialize)]
@@ -41,9 +42,9 @@ pub struct Record {
     #[serde(flatten)]
     pub activity: Option<Activity>,
     pub ds: Option<i64>,
+    pub timestamp: Option<i64>,
     pub geopoint: Option<GeoPoint>,
     pub elevation: Option<f32>,
-    pub timestamp: Option<String>,
     pub heartrate: Option<i32>,
     pub temperature: Option<i32>,
     pub speed: Option<f32>,
@@ -53,31 +54,35 @@ pub struct Record {
 }
 
 impl Record {
-    fn load_data(&mut self, data: &HashMap<String, String>) {
+    fn load_data(
+        &mut self,
+        data: &HashMap<String, String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(v) = data.get("ele") {
-            self.elevation = Some(v.parse::<f32>().unwrap());
+            self.elevation = Some(v.parse::<f32>()?);
         }
         if let Some(v) = data.get("time") {
-            self.timestamp = Some(v.clone());
+            self.timestamp = Some(get_timestamp(&v.clone(), RECORD_TIMESTAMP)?);
         }
         if let Some(v) = data.get("hr") {
-            self.heartrate = Some(v.parse::<i32>().unwrap());
+            self.heartrate = Some(v.parse::<i32>()?);
         }
         if let Some(v) = data.get("atemp") {
-            self.temperature = Some(v.parse::<i32>().unwrap());
+            self.temperature = Some(v.parse::<i32>()?);
         }
         if let Some(v) = data.get("speed") {
-            self.speed = Some(v.parse::<f32>().unwrap());
+            self.speed = Some(v.parse::<f32>()?);
         }
         if let Some(v) = data.get("course") {
-            self.course = Some(v.parse::<f32>().unwrap());
+            self.course = Some(v.parse::<f32>()?);
         }
         if let Some(v) = data.get("hAcc") {
-            self.hAcc = Some(v.parse::<f32>().unwrap());
+            self.hAcc = Some(v.parse::<f32>()?);
         }
         if let Some(v) = data.get("vAcc") {
-            self.vAcc = Some(v.parse::<f32>().unwrap());
+            self.vAcc = Some(v.parse::<f32>()?);
         }
+        Ok(())
     }
 
     fn _null_island(&self) -> Result<bool, Box<dyn std::error::Error>> {
@@ -89,14 +94,14 @@ impl Record {
 
     pub fn validate(&self) -> Result<bool, Box<dyn std::error::Error>> {
         Ok(!(self._null_island()?)
-            && !(self.timestamp.is_none()
+            && !(self.elevation.is_none()
+                && self.timestamp.is_none()
                 && self.heartrate.is_none()
                 && self.temperature.is_none()
-                && self.timestamp.is_none()
-                && self.timestamp.is_none()
-                && self.timestamp.is_none()
-                && self.timestamp.is_none()
-                && self.timestamp.is_none()))
+                && self.speed.is_none()
+                && self.course.is_none()
+                && self.hAcc.is_none()
+                && self.vAcc.is_none()))
     }
 }
 
@@ -113,10 +118,11 @@ impl Workout {
         let coords: Vec<String> = self
             .records
             .iter()
-            .filter(|record| record.validate().unwrap())
-            .map(|record| match &record.geopoint {
-                Some(g) => format!("[{},{}]", g.lat, g.lng),
-                None => String::from("[0.0,0.0]"),
+            .filter_map(|record| {
+                record.validate().ok().and_then(|_| match &record.geopoint {
+                    Some(g) => Some(format!("[{},{}]", g.lat, g.lng)),
+                    None => Some(String::from("[0.0,0.0]")),
+                })
             })
             .collect();
         let mut result: String = "'[ ".to_owned();
@@ -143,29 +149,29 @@ lazy_static! {
 pub fn get_activity(path: &str) -> Result<Activity, Box<dyn std::error::Error>> {
     if let Some(captures) = ACTIVITY_EXPR.captures(path) {
         let name = &captures[0];
-        Ok(Activity::from_str(name).unwrap())
+        Ok(Activity::from_str(name)?)
     } else {
         Ok(Activity::Unknown)
     }
 }
 
-pub fn get_timestamp(path: &str) -> Result<NaiveDateTime, Box<dyn std::error::Error>> {
-    let re: Regex = Regex::new(REGEX_CHARS).unwrap();
-    let d = re.find(path).unwrap().as_str();
+pub fn get_timestamp(path: &str, regex: &str) -> Result<i64, Box<dyn std::error::Error>> {
+    let re: Regex = Regex::new(regex)?;
+    let d = re.find(path).ok_or("No match found")?.as_str();
     let timestamp = NaiveDateTime::parse_from_str(d, DATETIME_FMT)?;
-    Ok(timestamp)
+    Ok(timestamp.timestamp())
 }
 
 // #[tracing::instrument]
 pub fn load_gpx(path: PathBuf) -> Result<Option<Workout>, Box<dyn std::error::Error>> {
     let path_str = path.to_str().ok_or("")?;
     let activity = get_activity(path_str)?;
-    let timestamp = get_timestamp(path_str)?;
+    let timestamp = get_timestamp(path_str, REGEX_CHARS)?;
     info!("Loading activity {:?} from {}", activity, timestamp);
     match activity {
         Activity::Unknown => Ok(None),
         _ => {
-            let file = File::open(path).unwrap();
+            let file = File::open(path)?;
             let file = BufReader::new(file);
 
             let mut records: Vec<Record> = Vec::new();
@@ -196,18 +202,18 @@ pub fn load_gpx(path: PathBuf) -> Result<Option<Workout>, Box<dyn std::error::Er
                     }
                     XmlEvent::Characters(text) => {
                         let map = HashMap::from([(current_element.clone(), text.clone())]);
-                        record.load_data(&map);
+                        record.load_data(&map)?;
                     }
                     _ => (),
                 }
                 record.geopoint = Some(geopoint);
                 record.activity = Some(activity.clone());
-                record.ds = Some(timestamp.clone().timestamp());
+                record.ds = Some(timestamp);
                 records.push(record.clone());
             }
             Ok(Some(Workout {
                 activity: activity.clone(),
-                timestamp: timestamp.clone().timestamp(),
+                timestamp,
                 records,
             }))
         }

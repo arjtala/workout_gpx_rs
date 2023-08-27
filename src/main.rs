@@ -1,5 +1,5 @@
-use std::{path::PathBuf, str::FromStr};
 use std::num::ParseIntError;
+use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use sha256::digest;
