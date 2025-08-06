@@ -2,8 +2,9 @@ use std::num::ParseIntError;
 use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
+use rusqlite::Connection;
 use sha256::digest;
-use sqlx::{Pool, Sqlite};
+use tokio::sync::mpsc::channel;
 use tracing::info;
 
 mod sql;
@@ -20,10 +21,6 @@ struct Args {
     /// Create table in SQLite
     #[arg(short, long, default_value_t = false)]
     create_table: bool,
-
-    /// Level of concurrency to use for insertions
-    #[arg(long, default_value_t = 4)]
-    concurrency: usize,
 
     /// Test hashing
     #[arg(short, long, default_value_t = false)]
@@ -57,13 +54,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return test_hash();
     }
 
-    let sqlite_pool: Pool<Sqlite> = sql::get_sqlite_pool(args.concurrency).await?;
+    let mut connection: Connection = sql::get_connection()?;
     if args.create_table {
         info!("Creating new table in SQLite database");
-        sql::create_table(&sqlite_pool).await?;
+        sql::create_table(&connection).await?;
     }
-
-    let mut workouts: Vec<Workout> = Vec::new();
 
     if let Some(p) = args.path {
         let path = PathBuf::from_str(p.as_str())?;
@@ -75,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         if path.is_file() {
-            let workout: Workout = match load_gpx(path).unwrap() {
+            let workout: Workout = match load_gpx(path)? {
                 Some(w) => w,
                 None => panic!("Unable to load workout"),
             };
@@ -85,24 +80,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workout.records.len(),
                 workout.activity
             );
-            workouts.push(workout);
-        } else if path.is_dir() {
-            let files = path.read_dir().unwrap();
-            for file in files {
-                let path = PathBuf::from_str(file.unwrap().path().to_str().unwrap()).unwrap();
-                match load_gpx(path).unwrap() {
-                    Some(w) => {
-                        workouts.push(w);
-                    }
-                    _ => {
-                        println!("Unable to parse record");
-                    }
-                }
-            }
+            let (tx, rx) = channel(1);
+            tx.send(workout).await?;
+            sql::insert_records(&mut connection, rx).await?;
         }
+
+        // } else if path.is_dir() {
+        //     let files = path.read_dir().unwrap();
+        //     for file in files {
+        //         let path = PathBuf::from_str(file.unwrap().path().to_str().unwrap()).unwrap();
+        //         match load_gpx(path).unwrap() {
+        //             Some(w) => {
+        //                 workouts.push(w);
+        //             }
+        //             _ => {
+        //                 println!("Unable to parse record");
+        //             }
+        //         }
+        //     }
+        // }
     }
-    info!("Loaded {} workouts to insert", workouts.len());
-    sql::insert_records(&sqlite_pool, workouts, args.concurrency).await?;
 
     Ok(())
 }

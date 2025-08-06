@@ -10,12 +10,13 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
 use strum::{EnumString, EnumVariantNames, VariantNames};
-use tracing::info;
 use xml::reader::{EventReader, XmlEvent};
 
 static EPSILON: f64 = 0.0000001;
-const DATETIME_FMT: &str = "%Y-%m-%d-%H%M%S";
-const RECORD_TIMESTAMP: &str = "%Y-%m-%dT%H:%M:%S.000Z";
+const WORKOUT_DATETIME_FMT: &str = "%Y-%m-%d-%H%M%S";
+const RECORD_DATETIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
+const RECORD_TIMESTAMP: &str =
+    r"(?<y>\d{4})-(?<m>\d{2})-(?<d>\d{2})T(?<H>\d{2}):(?<M>\d{2}):(?<S>\d{2}).(?<Z>\d{3})Z";
 const REGEX_CHARS: &str = "[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}";
 
 #[derive(Clone, EnumString, EnumVariantNames, Debug, Serialize, Deserialize)]
@@ -62,7 +63,7 @@ impl Record {
             self.elevation = Some(v.parse::<f32>()?);
         }
         if let Some(v) = data.get("time") {
-            self.timestamp = Some(get_timestamp(&v.clone(), RECORD_TIMESTAMP)?);
+            self.timestamp = Some(get_record_timestamp(&v.clone(), RECORD_TIMESTAMP)?);
         }
         if let Some(v) = data.get("hr") {
             self.heartrate = Some(v.parse::<i32>()?);
@@ -119,9 +120,9 @@ impl Workout {
             .records
             .iter()
             .filter_map(|record| {
-                record.validate().ok().and_then(|_| match &record.geopoint {
-                    Some(g) => Some(format!("[{},{}]", g.lat, g.lng)),
-                    None => Some(String::from("[0.0,0.0]")),
+                record.validate().ok().map(|_| match &record.geopoint {
+                    Some(g) => format!("[{},{}]", g.lat, g.lng),
+                    None => String::from("[0.0,0.0]"),
                 })
             })
             .collect();
@@ -155,19 +156,26 @@ pub fn get_activity(path: &str) -> Result<Activity, Box<dyn std::error::Error>> 
     }
 }
 
-pub fn get_timestamp(path: &str, regex: &str) -> Result<i64, Box<dyn std::error::Error>> {
+pub fn get_workout_timestamp(path: &str, regex: &str) -> Result<i64, Box<dyn std::error::Error>> {
     let re: Regex = Regex::new(regex)?;
     let d = re.find(path).ok_or("No match found")?.as_str();
-    let timestamp = NaiveDateTime::parse_from_str(d, DATETIME_FMT)?;
+    let timestamp = NaiveDateTime::parse_from_str(d, WORKOUT_DATETIME_FMT)?;
+	Ok(timestamp.timestamp())
+}
+
+
+pub fn get_record_timestamp(time: &str, regex: &str) -> Result<i64, Box<dyn std::error::Error>> {
+    let re: Regex = Regex::new(regex)?;
+    let d = re.replace_all(time, "$y-$m-$d $H:$M:$S");
+    let timestamp = NaiveDateTime::parse_from_str(&d, RECORD_DATETIME_FMT)?;
     Ok(timestamp.timestamp())
 }
 
-// #[tracing::instrument]
+#[tracing::instrument]
 pub fn load_gpx(path: PathBuf) -> Result<Option<Workout>, Box<dyn std::error::Error>> {
     let path_str = path.to_str().ok_or("")?;
     let activity = get_activity(path_str)?;
-    let timestamp = get_timestamp(path_str, REGEX_CHARS)?;
-    info!("Loading activity {:?} from {}", activity, timestamp);
+    let timestamp = get_workout_timestamp(path_str, REGEX_CHARS)?;
     match activity {
         Activity::Unknown => Ok(None),
         _ => {
@@ -179,16 +187,15 @@ pub fn load_gpx(path: PathBuf) -> Result<Option<Workout>, Box<dyn std::error::Er
             let mut record = Record {
                 ..Default::default()
             };
-
             let parser = EventReader::new(file);
             for event in parser {
                 let mut geopoint = GeoPoint {
                     ..Default::default()
                 };
-                match event? {
-                    XmlEvent::StartElement {
+                match event {
+                    Ok(XmlEvent::StartElement {
                         name, attributes, ..
-                    } => {
+                    }) => {
                         current_element = name.local_name;
                         if current_element.as_str() == "trkpt" {
                             for attr in attributes {
@@ -200,10 +207,11 @@ pub fn load_gpx(path: PathBuf) -> Result<Option<Workout>, Box<dyn std::error::Er
                             }
                         }
                     }
-                    XmlEvent::Characters(text) => {
+                    Ok(XmlEvent::Characters(text)) => {
                         let map = HashMap::from([(current_element.clone(), text.clone())]);
                         record.load_data(&map)?;
                     }
+                    Err(e) => panic!("Error processing event: {}", e),
                     _ => (),
                 }
                 record.geopoint = Some(geopoint);

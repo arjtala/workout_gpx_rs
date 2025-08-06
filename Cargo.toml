@@ -26,7 +26,6 @@ walkers = "0.6.0"
 eframe = "0.22.0"
 egui = "0.22.0"
 env_logger = "0.10.0"
-sqlx = { version = "0.7.1", features = [ "runtime-tokio-rustls", "sqlite", "uuid", "chrono", "migrate" ] }
 futures = "0.3.28"
 sha256 = "1.4.0"
 const_format = "0.2.31"
